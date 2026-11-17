@@ -1,0 +1,1 @@
+Use the dev kit inbuilt LSM303AGR and 4 LEDS to point to North, south, east and west.

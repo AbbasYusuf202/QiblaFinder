@@ -1,0 +1,1 @@
+Make a custom pcb with a gnss receiver, some method of powering, LSM303AGR and a circular LED array to get a more accurate qibla direction.

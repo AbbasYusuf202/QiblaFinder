@@ -1,0 +1,1 @@
+Obtain GNSS receiver and along with inbuilt LSM303AGR use 4 LEDS to point to the qibla which is the kaaba in Mecca.
