@@ -1,8 +1,68 @@
 
 #include "stm32f4xx.h"
 #include "i2c.h"
+#include "dma.h"
 
 #define I2C_ERROR_FLAGS (I2C_SR1_AF | I2C_SR1_BERR | I2C_SR1_ARLO | I2C_SR1_OVR)
+#define I2C_SCL_PIN (1U << 6)
+#define I2C_SDA_PIN (1U << 9)
+
+// i2c_init configures I2C1 for a 16 MHz APB1 clock, so TIM2 runs at 16 MHz
+// with the reset clock tree and a prescaler of 15 produces 1 MHz ticks.
+static void i2c_recovery_timer_init(void)
+{
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
+    RCC->APB1RSTR |= RCC_APB1RSTR_TIM2RST;
+    RCC->APB1RSTR &= ~RCC_APB1RSTR_TIM2RST;
+
+    TIM2->CR1 = 0U;
+    TIM2->PSC = 15U;
+    TIM2->ARR = 0xFFFFFFFFU;
+    TIM2->CNT = 0U;
+    TIM2->EGR = TIM_EGR_UG;
+    TIM2->SR = 0U;
+    TIM2->CR1 = TIM_CR1_CEN;
+}
+
+static void i2c_wait_us(uint32_t microseconds)
+{
+    uint32_t start = TIM2->CNT;
+    while ((uint32_t)(TIM2->CNT - start) < microseconds) { }
+}
+
+// A debugger restart can reset the MCU while the sensor remains powered and
+// mid-byte. Release the open-drain lines and clock the sensor back to idle.
+static void i2c_recover_bus(void)
+{
+    const uint32_t pin_mode_mask = (3U << 12) | (3U << 18);
+
+    // Set the released state and open-drain mode before enabling GPIO output,
+    // avoiding a brief push-pull low pulse when leaving alternate function.
+    GPIOB->OTYPER |= I2C_SCL_PIN | I2C_SDA_PIN;
+    GPIOB->ODR |= I2C_SCL_PIN | I2C_SDA_PIN;
+    GPIOB->MODER = (GPIOB->MODER & ~pin_mode_mask) | (1U << 12) | (1U << 18);
+    i2c_wait_us(5U);
+
+    if ((GPIOB->IDR & I2C_SDA_PIN) == 0U)
+    {
+        for (uint32_t pulse = 0U; pulse < 9U &&
+             (GPIOB->IDR & I2C_SDA_PIN) == 0U; pulse++)
+        {
+            GPIOB->ODR &= ~I2C_SCL_PIN;
+            i2c_wait_us(5U);
+            GPIOB->ODR |= I2C_SCL_PIN;
+            i2c_wait_us(5U);
+        }
+
+        // Form STOP: SDA rises while SCL is released high.
+        GPIOB->ODR &= ~I2C_SDA_PIN;
+        i2c_wait_us(5U);
+        GPIOB->ODR |= I2C_SCL_PIN;
+        i2c_wait_us(5U);
+        GPIOB->ODR |= I2C_SDA_PIN;
+        i2c_wait_us(5U);
+    }
+}
 
 static void i2c_wait_bus_free(void)
 {
@@ -14,6 +74,8 @@ static void i2c_wait_bus_free(void)
 static void i2c_abort(void)
 {
     // End the incomplete transfer and restore the defaults used by reads.
+    I2C1->CR2 &= ~(I2C_CR2_DMAEN | I2C_CR2_LAST);
+    dma_i2c1_abort();
     I2C1->CR1 |= I2C_CR1_STOP;
 
     I2C1->CR1 &= ~I2C_CR1_POS;
@@ -45,6 +107,12 @@ void i2c_init(void)
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
     RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
 
+    // Reset I2C1 first so it releases the pins before GPIO bus recovery.
+    RCC->APB1RSTR |= RCC_APB1RSTR_I2C1RST;
+    RCC->APB1RSTR &= ~RCC_APB1RSTR_I2C1RST;
+    i2c_recovery_timer_init();
+    i2c_recover_bus();
+
     GPIOB->MODER &= ~((3U << 12) | (3U << 18));
     GPIOB->MODER |=  ((2U << 12) | (2U << 18));
     GPIOB->OTYPER |= (1U << 6) | (1U << 9);
@@ -56,14 +124,12 @@ void i2c_init(void)
     GPIOB->AFR[1] &= ~(0xFU << 4);
     GPIOB->AFR[1] |=  (4U << 4);
 
-    RCC->APB1RSTR |= RCC_APB1RSTR_I2C1RST;
-    RCC->APB1RSTR &= ~RCC_APB1RSTR_I2C1RST;
-
     I2C1->CR1 = 0U;
     I2C1->CR2 = 16U;
     I2C1->CCR = 80U;
     I2C1->TRISE = 17U;
     I2C1->CR1 = I2C_CR1_PE | I2C_CR1_ACK;
+
 }
 
 
@@ -100,13 +166,32 @@ i2c_status_t i2c_write(uint8_t address,
 
     if (status != I2C_OK) return status;
 
-    for (size_t i = 0U; i < length; i++)
+    if (length >= 2U && length <= 65535U)
     {
-        status = i2c_wait_flag(I2C_SR1_TXE);
+        dma_init();
+        if (!dma_i2c1_tx_prepare(data, length))
+        {
+            i2c_abort();
+            return I2C_ERROR;
+        }
+        I2C1->CR2 |= I2C_CR2_DMAEN;
+        if (!dma_i2c1_tx_wait())
+        {
+            i2c_abort();
+            return I2C_ERROR;
+        }
+        I2C1->CR2 &= ~I2C_CR2_DMAEN;
+    }
+    else
+    {
+        for (size_t i = 0U; i < length; i++)
+        {
+            status = i2c_wait_flag(I2C_SR1_TXE);
 
-        if (status != I2C_OK) return status;
+            if (status != I2C_OK) return status;
 
-        I2C1->DR = data[i];
+            I2C1->DR = data[i];
+        }
     }
 
     status = i2c_wait_flag(I2C_SR1_BTF);
@@ -171,7 +256,37 @@ i2c_status_t i2c_read(uint8_t address,
 
     if (status != I2C_OK) return status;
 
-    if (length == 1U)
+    if (length >= 3U && length <= 65535U)
+    {
+        // DMA handles multi-byte payloads. Keep 1- and 2-byte receives on the
+        // proven polling sequence because their ACK/NACK timing is special.
+        dma_init();
+        I2C1->CR2 |= I2C_CR2_DMAEN | I2C_CR2_LAST;
+
+        // Arm the stream before clearing ADDR; that releases the receive
+        // clock-stretch and allows the first byte to arrive immediately.
+        if (!dma_i2c1_rx_prepare(data, length))
+        {
+            I2C1->CR2 &= ~(I2C_CR2_DMAEN | I2C_CR2_LAST);
+            i2c_abort();
+            return I2C_ERROR;
+        }
+
+        (void)I2C1->SR1;
+        (void)I2C1->SR2;
+
+        if (!dma_i2c1_rx_wait())
+        {
+            I2C1->CR2 &= ~(I2C_CR2_DMAEN | I2C_CR2_LAST);
+            i2c_abort();
+            return I2C_ERROR;
+        }
+
+        I2C1->CR1 |= I2C_CR1_STOP;
+        while ((I2C1->CR1 & I2C_CR1_STOP) != 0U) { }
+        I2C1->CR2 &= ~(I2C_CR2_DMAEN | I2C_CR2_LAST);
+    }
+    else if (length == 1U)
     {
         // Disable ACK before clearing ADDR
         I2C1->CR1 &= ~I2C_CR1_ACK;

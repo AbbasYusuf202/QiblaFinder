@@ -14,6 +14,7 @@ typedef enum
 
 void i2c_init(void);
 
+// Calls remain blocking; multi-byte payloads are moved by DMA.
 i2c_status_t i2c_write(uint8_t address,
                        uint8_t reg,
                        const uint8_t *data,
