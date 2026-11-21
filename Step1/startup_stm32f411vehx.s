@@ -91,6 +91,15 @@ LoopFillZerobss:
   cmp r2, r4
   bcc FillZerobss
 
+/* Enable full access to the Cortex-M4 single-precision FPU before C code. */
+  ldr r0, =0xE000ED88
+  ldr r1, [r0]
+  ldr r2, =0x00F00000
+  orrs r1, r2
+  str r1, [r0]
+  dsb
+  isb
+
 /* Call the application's entry point.*/
   bl  main
   bx  lr    
