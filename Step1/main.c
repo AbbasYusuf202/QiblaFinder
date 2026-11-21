@@ -1,18 +1,36 @@
 
 #include "stm32f4xx.h"
+#include "i2c.h"
+#include "lsm303agr.h"
+
+// Global sensor readings for Cortex-Debug Live Watch
+volatile lsm303agr_axes_t accel;
+volatile lsm303agr_axes_t mag;
 
 int main(void)
 {
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIODEN;
+    i2c_init();
 
-    GPIOD->MODER &= ~(3U << 28);
-    GPIOD->MODER |=  (1U << 28);
+    // A failed identity/configuration check means the sensor cannot be used.
+    if (lsm303agr_init() != I2C_OK)
+    {
+        while (1)
+        {
+            // Sensor initialisation failed
+        }
+    }
 
     while (1)
     {
-        GPIOD->ODR |= (1U << 14U);
-        for (volatile uint32_t i = 0; i < 1000000U; i++);
-        GPIOD->ODR &= ~(1U << 14U);
-        for (volatile uint32_t i = 0; i < 1000000U; i++);
+        // Skip this sample if the bus read failed; keep the last good values.
+        if (lsm303agr_read_accel(&accel) != I2C_OK)
+        {
+            continue;
+        }
+
+        if (lsm303agr_read_mag(&mag) != I2C_OK)
+        {
+            continue;
+        }
     }
 }

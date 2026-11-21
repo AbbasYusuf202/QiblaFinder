@@ -13,13 +13,13 @@ FLAGS = -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=softfp \
         -Wall -Wextra -std=gnu11 -O0 -g3 -ffreestanding \
         -ffunction-sections -fdata-sections \
         -ICMSIS \
-		-IINCLUDES \
+		-IIncludes \
         -DSTM32F411xE \
         -T STM32F411VEHX_FLASH.ld -Wl,--gc-sections \
         -Wl,-Map=$(TARGET).map \
         --specs=nosys.specs -nostartfiles
 
-C_SOURCES = main.c
+C_SOURCES = $(wildcard *.c)
 ASM_SOURCES = startup_stm32f411vehx.s
 OBJECTS = $(C_SOURCES:.c=.o) $(ASM_SOURCES:.s=.o)
 
